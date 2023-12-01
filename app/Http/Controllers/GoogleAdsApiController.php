@@ -292,11 +292,13 @@ class GoogleAdsApiController extends Controller
         // ]);
 
         // Generate a refreshable OAuth2 credential for authentication.
-        $oAuth2Credential = (new OAuth2TokenBuilder())->fromFile()->build();
+        $pathConfig = app_path('..\config\google_ads_php.ini');
+        $oAuth2Credential = (new OAuth2TokenBuilder())->fromFile($pathConfig)->build();
 
         // Construct a Google Ads client configured from a properties file and the
         // OAuth2 credentials above.
-        $googleAdsClient = (new GoogleAdsClientBuilder())->fromFile()
+
+        $googleAdsClient = (new GoogleAdsClientBuilder())->fromFile($pathConfig)
             ->withOAuth2Credential($oAuth2Credential)
             // We set this value to true to show how to use GAPIC v2 source code. You can remove the
             // below line if you wish to use the old-style source code. Note that in that case, you
