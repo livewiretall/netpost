@@ -46,6 +46,7 @@ use Google\Ads\GoogleAds\V15\Services\ManualCpcBiddingStrategy;
 use Google\ApiCore\ApiException;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\View\View;
 
 
@@ -313,24 +314,26 @@ class GoogleAdsApiController extends Controller
                 $googleAdsClient,
                 self::CUSTOMER_ID
             );
-        } catch (GoogleAdsException $googleAdsException) {
-            printf(
-                "Request with ID '%s' has failed.%sGoogle Ads failure details:%s",
-                $googleAdsException->getRequestId(),
-                PHP_EOL,
-                PHP_EOL
-            );
-            foreach ($googleAdsException->getGoogleAdsFailure()->getErrors() as $error) {
-                /** @var GoogleAdsError $error */
-                printf(
-                    "\t%s: %s%s",
-                    $error->getErrorCode()->getErrorCode(),
-                    $error->getMessage(),
-                    PHP_EOL
-                );
-            }
-            exit(1);
-        } catch (ApiException $apiException) {
+        }
+//        catch (GoogleAdsException $googleAdsException) {
+//            printf(
+//                "Request with ID '%s' has failed.%sGoogle Ads failure details:%s",
+//                $googleAdsException->getRequestId(),
+//                PHP_EOL,
+//                PHP_EOL
+//            );
+//            foreach ($googleAdsException->getGoogleAdsFailure()->getErrors() as $error) {
+//                /** @var GoogleAdsError $error */
+//                printf(
+//                    "\t%s: %s%s",
+//                    $error->getErrorCode()->getErrorCode(),
+//                    $error->getMessage(),
+//                    PHP_EOL
+//                );
+//            }
+//            exit(1);
+//        }
+        catch (ApiException $apiException) {
             printf(
                 "ApiException was thrown with message '%s'.%s",
                 $apiException->getMessage(),
@@ -354,19 +357,25 @@ class GoogleAdsApiController extends Controller
         $campaignToForecast = self::createCampaignToForecast();
         $keywordPlanIdeaServiceClient = $googleAdsClient->getKeywordPlanIdeaServiceClient();
         // Generates keyword forecast metrics based on the specified parameters.
-        $response = $keywordPlanIdeaServiceClient->generateKeywordForecastMetrics(
-            new GenerateKeywordForecastMetricsRequest([
-                'customer_id' => $customerId,
-                'campaign' => $campaignToForecast,
-                'forecast_period' => new DateRange([
-                    // Sets the forecast start date to tomorrow.
-                    'start_date' => date('Ymd', strtotime('+1 day')),
-                    // Sets the forecast end date to 30 days from today.
-                    'end_date' => date('Ymd', strtotime('+30 days'))
-                ])
+        $generateKeywordForecastMetricsRequest = new GenerateKeywordForecastMetricsRequest([
+            'customer_id' => $customerId,
+            'campaign' => $campaignToForecast,
+            'forecast_period' => new DateRange([
+                // Sets the forecast start date to tomorrow.
+                'start_date' => date('Ymd', strtotime('+1 day')),
+                // Sets the forecast end date to 30 days from today.
+                'end_date' => date('Ymd', strtotime('+30 days'))
             ])
-        );
+        ]);
+//        dd($generateKeywordForecastMetricsRequest);
+        try {
+            $response = $keywordPlanIdeaServiceClient->generateKeywordForecastMetrics(
+                $generateKeywordForecastMetricsRequest
+            );
 
+        } catch (ApiException $e) {
+            \Log::info($e->getMessage());
+        }
         $metrics = $response->getCampaignForecastMetrics();
         printf(
             "Estimated daily clicks: %s%s",
@@ -458,4 +467,160 @@ class GoogleAdsApiController extends Controller
         return $campaignToForecast;
     }
     // [END generate_forecast_metrics]
+
+
+    public function generateKeywordForecast(Request $request): \Illuminate\Http\JsonResponse
+    {
+        // Validate the request parameters
+        $validator = Validator::make($request->all(), [
+            'months' => 'required|integer|min:1|max:12',
+            'regional' => 'required|integer|in:0,1',
+            'keywords' => 'required|string',
+            'locations' => 'nullable|array',
+            'languages' => 'nullable|array',
+            'dev_computers' => 'required|integer|in:0,1',
+            'dev_mobiles' => 'required|integer|in:0,1',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['error' => $validator->errors()->toJson()], 422);
+        }
+
+        // Extract the parameters
+        $months = (int) $request->input('months');
+        $regional = (bool) $request->input('regional');
+        $keywords = explode(',', $request->input('keywords'));
+        $locations = $request->input('locations') ?: [];
+        $languages = $request->input('languages') ?: [];
+        $devComputers = (bool) $request->input('dev_computers');
+        $devMobiles = (bool) $request->input('dev_mobiles');
+
+        // Get Google Ads client and KeywordPlanIdeaServiceClient
+        $pathConfig = app_path('..\config\google_ads_php.ini');
+        $oAuth2Credential = (new OAuth2TokenBuilder())->fromFile($pathConfig)->build();
+
+        // Construct a Google Ads client configured from a properties file and the
+        // OAuth2 credentials above.
+
+        $googleAdsClient = (new GoogleAdsClientBuilder())->fromFile($pathConfig)
+            ->withOAuth2Credential($oAuth2Credential)
+            // We set this value to true to show how to use GAPIC v2 source code. You can remove the
+            // below line if you wish to use the old-style source code. Note that in that case, you
+            // probably need to modify some parts of the code below to make it work.
+            // For more information, see
+            // https://developers.devsite.corp.google.com/google-ads/api/docs/client-libs/php/gapic.
+            ->usingGapicV2Source(true)
+            ->build();
+//        $googleAdsClient = $this->getGoogleAdsClient();
+        $keywordPlanIdeaServiceClient = $googleAdsClient->getKeywordPlanIdeaServiceClient();
+
+        // Generate forecast based on user settings
+        $campaignToForecast = $this->createCampaignToForecastt($keywords, $regional, $locations, $languages, $devComputers, $devMobiles);
+        $forecastPeriod = $this->createForecastPeriod($months);
+
+        $generateKeywordForecastMetricsRequest = new GenerateKeywordForecastMetricsRequest([
+            'customer_id' => $this->getCustomerId(),
+            'campaign' => $campaignToForecast,
+            'forecast_period' => $forecastPeriod,
+        ]);
+
+        // Send request and handle response
+        try {
+            $response = $keywordPlanIdeaServiceClient->generateKeywordForecastMetrics($generateKeywordForecastMetricsRequest);
+            $metrics = $response->getCampaignForecastMetrics();
+
+            // Format and return response
+            $data = [
+                'clicks' => $metrics->hasClicks() ? sprintf("%.2f", $metrics->getClicks()) : 'none',
+                'impressions' => $metrics->hasImpressions() ? sprintf("%.2f", $metrics->getImpressions()) : 'none',
+                'average_cpc_micros' => $metrics->hasAverageCpcMicros() ? sprintf("%d", $metrics->getAverageCpcMicros()) : 'none',
+            ];
+
+            return response()->json($data, 200);
+        } catch (ApiException $e) {
+            // Log error and return appropriate response
+            \Log::error($e->getMessage());
+            return response()->json(['error' => $e->getMessage()], 500);
+        }
+    }
+
+    private function createCampaignToForecastt(array $keywords, bool $regional, array $locations, array $languages, bool $devComputers, bool $devMobiles): CampaignToForecast
+    {
+        // Create the campaign to forecast
+        $campaignToForecast = new CampaignToForecast([
+            'keyword_plan_network' => KeywordPlanNetwork::GOOGLE_SEARCH,
+            'bidding_strategy' => new CampaignBiddingStrategy([
+                'manual_cpc_bidding_strategy' => new ManualCpcBiddingStrategy([
+                    'max_cpc_bid_micros' => 1_000_000
+                ])
+            ])
+        ]);
+
+        // Set geo modifiers based on the provided locations
+        if (!empty($locations)) {
+            $campaignToForecast->setGeoModifiers(array_map(function ($locationId) {
+                return new CriterionBidModifier([
+                    'geo_target_constant' => ResourceNames::forGeoTargetConstant($locationId)
+                ]);
+            }, $locations));
+        }
+
+        // Set language constants based on the provided languages
+        if (!empty($languages)) {
+            $campaignToForecast->setLanguageConstants(array_map(function ($languageId) {
+                return ResourceNames::forLanguageConstant($languageId);
+            }, $languages));
+        }
+
+        // Create and add forecast ad groups based on keywords and device targeting
+        $forecastAdGroup = new ForecastAdGroup([
+            'biddable_keywords' => array_map(function ($keyword) {
+                return new BiddableKeyword([
+                    'max_cpc_bid_micros' => 2_500_000,
+                    'keyword' => new KeywordInfo([
+                        'text' => $keyword,
+                        'match_type' => KeywordMatchType::BROAD
+                    ])
+                ]);
+            }, $keywords),
+            'negative_keywords' => []
+        ]);
+
+        // Set device targeting based on devComputers and devMobiles parameters
+        if (!$devComputers) {
+            $forecastAdGroup->setDeviceTargeting([
+                'device' => DeviceEnum::MOBILE
+            ]);
+        }
+
+        if (!$devMobiles) {
+            $forecastAdGroup->setDeviceTargeting([
+                'device' => DeviceEnum::DESKTOP
+            ]);
+        }
+
+        $campaignToForecast->setAdGroups([$forecastAdGroup]);
+
+        return $campaignToForecast;
+    }
+
+    private function createForecastPeriod(int $months): DateRange
+    {
+        // Create the forecast period based on the provided number of months
+        $startDate = date('Ymd', strtotime('+1 day'));
+        $endDate = date('Ymd', strtotime('+'.$months.' months'));
+
+        return new DateRange([
+            'start_date' => $startDate,
+            'end_date' => $endDate
+        ]);
+    }
+
+    private function getCustomerId(): int
+    {
+        // Replace this with your actual customer ID retrieval logic
+        return '4888767735';
+    }
+
+
 }
